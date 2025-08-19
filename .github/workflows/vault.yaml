@@ -63,6 +63,9 @@ jobs:
           echo "MONGODB_URI=${MONGODB_URI}" >> $GITHUB_ENV
           echo "JWT_SECRET=${JWT_SECRET}" >> $GITHUB_ENV
 
+      - name: Create Docker network
+        run: docker network create app-network || true
+
       - name: Stop previous containers (if any)
         run: |
           docker rm -f backend || true
@@ -72,6 +75,7 @@ jobs:
         run: |
           docker run -d \
             --name backend \
+            --network app-network \
             -p 5001:5001 \
             --env-file .env.runtime \
             "$BACKEND_IMAGE"
@@ -80,6 +84,7 @@ jobs:
         run: |
           docker run -d \
             --name frontend \
+            --network app-network \
             -p 3000:80 \
             "$FRONTEND_IMAGE"
 
