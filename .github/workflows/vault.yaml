@@ -84,10 +84,10 @@ jobs:
 
           # Runtime-only env file (NOT committed)
           cat > .env.runtime <<EOF
-PORT=${PORT}
-MONGODB_URI=${MONGODB_URI}
-JWT_SECRET=${JWT_SECRET}
-EOF
+          PORT=${PORT}
+          MONGODB_URI=${MONGODB_URI}
+          JWT_SECRET=${JWT_SECRET}
+          EOF
 
           # Export for later steps too
           echo "PORT=${PORT}" >> $GITHUB_ENV
@@ -116,10 +116,13 @@ EOF
 
       - name: Health check (backend)
         run: |
-          for i in $(seq 1 12); do
+          for i in {1..12}; do
             if curl -fsS http://localhost:5001/health >/dev/null 2>&1; then
-              echo "Backend healthy"; exit 0
+              echo "Backend healthy"
+              exit 0
             fi
-            echo "Waiting for backend... ($i)"; sleep 5
+            echo "Waiting for backend... ($i)"
+            sleep 5
           done
-          echo "Backend did not become healthy in time"; exit 1
+          echo "Backend did not become healthy in time"
+          exit 1
