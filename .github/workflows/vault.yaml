@@ -27,45 +27,14 @@ jobs:
           fi
           jq --version
 
-      - name: Install Docker (official repo)
-        run: |
-          set -euo pipefail
-
-          # Remove any old docker bits (ignore failures)
-          sudo apt-get remove -y docker docker-engine docker.io containerd runc || true
-
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates curl gnupg lsb-release
-
-          # Keyring
-          sudo install -m 0755 -d /etc/apt/keyrings
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo tee /etc/apt/keyrings/docker.asc >/dev/null
-          sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-          # Figure out Ubuntu codename safely
-          CODENAME="$(. /etc/os-release; echo ${UBUNTU_CODENAME:-$VERSION_CODENAME})"
-
-          # Repo line (avoid YAML/expression collisions by building vars first)
-          ARCH="$(dpkg --print-architecture)"
-          echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${CODENAME} stable" \
-            | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-
-          sudo apt-get update
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-          # Start docker and allow current user (takes effect next login; we use sudo meanwhile)
-          sudo systemctl enable --now docker
-          sudo usermod -aG docker "$USER" || true
-
-          # Quick sanity check
-          sudo docker --version
-          sudo docker compose version
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Build backend image
-        run: sudo docker build -t "$BACKEND_IMAGE" ./backend
+        run: docker build -t "$BACKEND_IMAGE" ./backend
 
       - name: Build frontend image
-        run: sudo docker build -t "$FRONTEND_IMAGE" ./frontend
+        run: docker build -t "$FRONTEND_IMAGE" ./frontend
 
       - name: Fetch secrets from Vault (HTTP API)
         run: |
@@ -96,12 +65,12 @@ jobs:
 
       - name: Stop previous containers (if any)
         run: |
-          sudo docker rm -f backend || true
-          sudo docker rm -f frontend || true
+          docker rm -f backend || true
+          docker rm -f frontend || true
 
       - name: Run backend container (inject secrets at runtime)
         run: |
-          sudo docker run -d \
+          docker run -d \
             --name backend \
             -p 5001:5001 \
             --env-file .env.runtime \
@@ -109,7 +78,7 @@ jobs:
 
       - name: Run frontend container
         run: |
-          sudo docker run -d \
+          docker run -d \
             --name frontend \
             -p 3000:80 \
             "$FRONTEND_IMAGE"
