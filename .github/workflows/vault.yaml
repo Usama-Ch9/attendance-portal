@@ -2,14 +2,14 @@ name: Build & Run Locally (Self-hosted)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build-and-run:
     runs-on: self-hosted
     env:
+      # From your repo secrets
       VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
       VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
       BACKEND_IMAGE: backend:latest
@@ -19,99 +19,107 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Docker on runner
+      - name: Install jq (if missing)
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+          jq --version
+
+      - name: Install Docker (official repo)
         run: |
           set -euo pipefail
 
-          echo ">>> Installing Docker..."
-
-          # Remove older versions if any
+          # Remove any old docker bits (ignore failures)
           sudo apt-get remove -y docker docker-engine docker.io containerd runc || true
 
           sudo apt-get update
           sudo apt-get install -y ca-certificates curl gnupg lsb-release
 
-          # Add Docker's official GPG key
+          # Keyring
           sudo install -m 0755 -d /etc/apt/keyrings
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo tee /etc/apt/keyrings/docker.asc > /dev/null
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo tee /etc/apt/keyrings/docker.asc >/dev/null
           sudo chmod a+r /etc/apt/keyrings/docker.asc
 
-          # Add repository
-          echo \
-            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-            $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
-            sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          # Figure out Ubuntu codename safely
+          CODENAME="$(. /etc/os-release; echo ${UBUNTU_CODENAME:-$VERSION_CODENAME})"
+
+          # Repo line (avoid YAML/expression collisions by building vars first)
+          ARCH="$(dpkg --print-architecture)"
+          echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${CODENAME} stable" \
+            | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
           sudo apt-get update
-
-          # Install Docker + Compose plugin
           sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-          # Ensure docker group exists and add runner user to it
-          sudo groupadd docker || true
-          sudo usermod -aG docker $USER || true
+          # Start docker and allow current user (takes effect next login; we use sudo meanwhile)
+          sudo systemctl enable --now docker
+          sudo usermod -aG docker "$USER" || true
 
-          # Restart docker service
-          sudo systemctl enable docker
-          sudo systemctl restart docker
-
-          # Verify installation
-          docker --version
-          docker compose version
-
-      - name: Ensure jq is available
-        run: |
-          if ! command -v jq >/dev/null 2>&1; then
-            echo ">>> Installing jq..."
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-          jq --version
+          # Quick sanity check
+          sudo docker --version
+          sudo docker compose version
 
       - name: Build backend image
-        run: docker build -t $BACKEND_IMAGE ./backend
+        run: sudo docker build -t "$BACKEND_IMAGE" ./backend
 
       - name: Build frontend image
-        run: docker build -t $FRONTEND_IMAGE ./frontend
+        run: sudo docker build -t "$FRONTEND_IMAGE" ./frontend
 
-      - name: Fetch secrets from Vault and write env file
-        id: fetch-vault
+      - name: Fetch secrets from Vault (HTTP API)
         run: |
           set -euo pipefail
 
-          resp=$(curl -sS --fail \
-            --header "X-Vault-Token: ${VAULT_TOKEN}" \
-            "${VAULT_ADDR}/v1/secret/data/myapp/config")
+          RESP="$(curl -sS --fail \
+            -H "X-Vault-Token: ${VAULT_TOKEN}" \
+            "${VAULT_ADDR}/v1/secret/data/myapp/config")"
 
-          PORT=$(echo "$resp" | jq -r '.data.data.PORT')
-          MONGODB_URI=$(echo "$resp" | jq -r '.data.data.MONGODB_URI')
-          JWT_SECRET=$(echo "$resp" | jq -r '.data.data.JWT_SECRET')
+          PORT="$(echo "$RESP" | jq -r '.data.data.PORT')"
+          MONGODB_URI="$(echo "$RESP" | jq -r '.data.data.MONGODB_URI')"
+          JWT_SECRET="$(echo "$RESP" | jq -r '.data.data.JWT_SECRET')"
 
+          # Basic checks
+          [ -n "$PORT" ] && [ "$PORT" != "null" ] || { echo "PORT missing in Vault"; exit 1; }
+
+          # Runtime-only env file (NOT committed)
           cat > .env.runtime <<EOF
 PORT=${PORT}
 MONGODB_URI=${MONGODB_URI}
 JWT_SECRET=${JWT_SECRET}
 EOF
 
+          # Export for later steps too
           echo "PORT=${PORT}" >> $GITHUB_ENV
           echo "MONGODB_URI=${MONGODB_URI}" >> $GITHUB_ENV
           echo "JWT_SECRET=${JWT_SECRET}" >> $GITHUB_ENV
 
-      - name: Stop previous containers
+      - name: Stop previous containers (if any)
         run: |
-          docker rm -f backend || true
-          docker rm -f frontend || true
+          sudo docker rm -f backend || true
+          sudo docker rm -f frontend || true
 
-      - name: Run backend container
+      - name: Run backend container (inject secrets at runtime)
         run: |
-          docker run -d \
+          sudo docker run -d \
             --name backend \
             -p 5001:5001 \
             --env-file .env.runtime \
-            ${{ env.BACKEND_IMAGE }}
+            "$BACKEND_IMAGE"
 
       - name: Run frontend container
         run: |
-          docker run -d \
+          sudo docker run -d \
             --name frontend \
             -p 3000:80 \
-            ${{ env.FRONTEND_IMAGE }}
+            "$FRONTEND_IMAGE"
+
+      - name: Health check (backend)
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fsS http://localhost:5001/health >/dev/null 2>&1; then
+              echo "Backend healthy"; exit 0
+            fi
+            echo "Waiting for backend... ($i)"; sleep 5
+          done
+          echo "Backend did not become healthy in time"; exit 1
