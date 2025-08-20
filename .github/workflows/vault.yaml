@@ -1,7 +1,7 @@
 name: Build & Run Locally (Self-hosted)
 
 on:
-  pull_request:
+  push:
     branches: [ main ]
   workflow_dispatch:
 
